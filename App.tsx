@@ -1,89 +1,128 @@
-import React, { useEffect, useState } from 'react';
-import { View, Text, StyleSheet, TouchableOpacity, SafeAreaView, StatusBar } from 'react-native';
-import { setApiKey, getApiKey } from './src/api/bankr';
-import { HomeScreen } from './src/screens/HomeScreen';
-import { MarketsScreen } from './src/screens/MarketsScreen';
-import { BetScreen } from './src/screens/BetScreen';
-import { PositionsScreen } from './src/screens/PositionsScreen';
-import { SettingsScreen } from './src/screens/SettingsScreen';
+import React, { useEffect, useState, useCallback } from 'react';
+import {
+  View,
+  Text,
+  StyleSheet,
+  ScrollView,
+  RefreshControl,
+  SafeAreaView,
+  StatusBar,
+  ActivityIndicator,
+} from 'react-native';
+import * as SecureStore from 'expo-secure-store';
 
-type TabId = 'home' | 'markets' | 'bet' | 'positions' | 'settings';
+const API_BASE = 'https://api.bankr.bot';
+const API_KEY = 'bk_3A7LSCL48LWJ6GK6GB35WZ282MCMRAX6';
 
-const TABS: { id: TabId; emoji: string; label: string }[] = [
-  { id: 'home', emoji: '💰', label: 'Balance' },
-  { id: 'markets', emoji: '🔍', label: 'Markets' },
-  { id: 'bet', emoji: '🎯', label: 'Bet' },
-  { id: 'positions', emoji: '📊', label: 'Positions' },
-  { id: 'settings', emoji: '⚙️', label: 'Settings' },
-];
+// Simple API call helper
+async function bankrPrompt(prompt: string): Promise<string> {
+  // Submit prompt
+  const submitRes = await fetch(`${API_BASE}/agent/prompt`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-API-Key': API_KEY,
+    },
+    body: JSON.stringify({ prompt }),
+  });
+  
+  if (!submitRes.ok) throw new Error('API error');
+  const { jobId } = await submitRes.json();
 
-// Pre-configured API key for convenience
-const DEFAULT_API_KEY = 'bk_3A7LSCL48LWJ6GK6GB35WZ282MCMRAX6';
+  // Poll for result
+  for (let i = 0; i < 30; i++) {
+    await new Promise(r => setTimeout(r, 1000));
+    
+    const pollRes = await fetch(`${API_BASE}/agent/job/${jobId}`, {
+      headers: { 'X-API-Key': API_KEY },
+    });
+    
+    if (!pollRes.ok) continue;
+    const result = await pollRes.json();
+    
+    if (result.status === 'completed') return result.response || '';
+    if (result.status === 'failed') throw new Error(result.error || 'Failed');
+  }
+  
+  throw new Error('Timeout');
+}
 
 export default function App() {
-  const [activeTab, setActiveTab] = useState<TabId>('home');
-  const [initialized, setInitialized] = useState(false);
+  const [positions, setPositions] = useState<string | null>(null);
+  const [balances, setBalances] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => {
-    // Auto-configure API key if not set
-    async function init() {
-      const existingKey = await getApiKey();
-      if (!existingKey) {
-        await setApiKey(DEFAULT_API_KEY);
-      }
-      setInitialized(true);
+  const fetchData = useCallback(async () => {
+    try {
+      setError(null);
+      const [pos, bal] = await Promise.all([
+        bankrPrompt('show my polymarket positions with current prices and pnl'),
+        bankrPrompt('what are my balances?'),
+      ]);
+      setPositions(pos);
+      setBalances(bal);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed to load');
+    } finally {
+      setLoading(false);
     }
-    init();
   }, []);
 
-  if (!initialized) {
+  const onRefresh = useCallback(async () => {
+    setRefreshing(true);
+    await fetchData();
+    setRefreshing(false);
+  }, [fetchData]);
+
+  useEffect(() => {
+    fetchData();
+  }, [fetchData]);
+
+  if (loading) {
     return (
       <View style={styles.loadingContainer}>
-        <Text style={styles.loadingText}>Loading...</Text>
+        <StatusBar barStyle="light-content" />
+        <ActivityIndicator size="large" color="#6366f1" />
+        <Text style={styles.loadingText}>Loading portfolio...</Text>
       </View>
     );
   }
 
-  const renderScreen = () => {
-    switch (activeTab) {
-      case 'home':
-        return <HomeScreen />;
-      case 'markets':
-        return <MarketsScreen />;
-      case 'bet':
-        return <BetScreen />;
-      case 'positions':
-        return <PositionsScreen />;
-      case 'settings':
-        return <SettingsScreen />;
-    }
-  };
-
   return (
     <SafeAreaView style={styles.container}>
-      <StatusBar barStyle="light-content" backgroundColor="#0f0f1a" />
-      
-      {/* Main content */}
-      <View style={styles.content}>
-        {renderScreen()}
-      </View>
+      <StatusBar barStyle="light-content" />
+      <ScrollView
+        style={styles.scrollView}
+        contentContainerStyle={styles.content}
+        refreshControl={
+          <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor="#6366f1" />
+        }
+      >
+        <Text style={styles.title}>📊 Portfolio</Text>
 
-      {/* Tab bar */}
-      <View style={styles.tabBar}>
-        {TABS.map((tab) => (
-          <TouchableOpacity
-            key={tab.id}
-            style={[styles.tab, activeTab === tab.id && styles.activeTab]}
-            onPress={() => setActiveTab(tab.id)}
-            activeOpacity={0.7}
-          >
-            <Text style={styles.tabEmoji}>{tab.emoji}</Text>
-            <Text style={[styles.tabLabel, activeTab === tab.id && styles.activeLabel]}>
-              {tab.label}
-            </Text>
-          </TouchableOpacity>
-        ))}
-      </View>
+        {error && (
+          <View style={styles.errorCard}>
+            <Text style={styles.errorText}>⚠️ {error}</Text>
+          </View>
+        )}
+
+        {/* Balances */}
+        <View style={styles.card}>
+          <Text style={styles.cardTitle}>💰 Balances</Text>
+          <Text style={styles.cardContent}>{balances || 'No data'}</Text>
+        </View>
+
+        {/* Positions */}
+        <View style={styles.card}>
+          <Text style={styles.cardTitle}>🎯 Positions</Text>
+          <Text style={styles.cardContent}>{positions || 'No positions'}</Text>
+        </View>
+
+        <Text style={styles.hint}>Pull down to refresh</Text>
+        <Text style={styles.wallet}>Wallet: 0x65e6...a1e2</Text>
+      </ScrollView>
     </SafeAreaView>
   );
 }
@@ -100,38 +139,63 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   loadingText: {
-    color: '#fff',
-    fontSize: 16,
+    color: '#9ca3af',
+    marginTop: 12,
+    fontSize: 14,
+  },
+  scrollView: {
+    flex: 1,
   },
   content: {
-    flex: 1,
+    padding: 16,
+    paddingTop: 20,
   },
-  tabBar: {
-    flexDirection: 'row',
+  title: {
+    fontSize: 32,
+    fontWeight: 'bold',
+    color: '#fff',
+    marginBottom: 20,
+  },
+  card: {
     backgroundColor: '#1a1a2e',
-    borderTopWidth: 1,
-    borderTopColor: '#2d2d44',
-    paddingBottom: 20, // Extra padding for iPhone home indicator
-    paddingTop: 8,
+    borderRadius: 12,
+    padding: 16,
+    marginBottom: 12,
   },
-  tab: {
-    flex: 1,
-    alignItems: 'center',
-    paddingVertical: 8,
-  },
-  activeTab: {
-    // Active styling handled by children
-  },
-  tabEmoji: {
-    fontSize: 22,
-    marginBottom: 2,
-  },
-  tabLabel: {
-    fontSize: 10,
-    color: '#6b7280',
-  },
-  activeLabel: {
-    color: '#818cf8',
+  cardTitle: {
+    fontSize: 16,
     fontWeight: '600',
+    color: '#818cf8',
+    marginBottom: 12,
+  },
+  cardContent: {
+    fontSize: 15,
+    color: '#e5e7eb',
+    lineHeight: 24,
+  },
+  errorCard: {
+    backgroundColor: '#2d1f1f',
+    borderRadius: 12,
+    padding: 16,
+    marginBottom: 12,
+    borderWidth: 1,
+    borderColor: '#7f1d1d',
+  },
+  errorText: {
+    color: '#fca5a5',
+    fontSize: 14,
+  },
+  hint: {
+    color: '#4b5563',
+    fontSize: 12,
+    textAlign: 'center',
+    marginTop: 20,
+  },
+  wallet: {
+    color: '#374151',
+    fontSize: 11,
+    textAlign: 'center',
+    marginTop: 8,
+    fontFamily: 'monospace',
   },
 });
